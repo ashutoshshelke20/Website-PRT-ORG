@@ -1,0 +1,214 @@
+Initially started with a single instance: Terraform-master
+
+Installed terraform using the below commands:
+sudo apt-get update
+sudo apt-get install -y wget unzip
+wget https://releases.hashicorp.com/terraform/1.5.0/terraform_1.5.0_linux_amd64.zip
+unzip terraform_1.5.0_linux_amd64.zip
+sudo mv terraform /usr/local/bin/
+
+Installed Ansible:
+apt-get update -y
+apt install software-properties-common
+add-apt-repository --yes --update ppa:ansible/ansible
+apt install ansible -y
+ansible --version
+cd .ssh/
+ls -l
+
+Created a main.tf terraform file.
+provider "aws" {
+  region = "us-east-1"
+  access_key= ""
+  secret_key= ""
+}
+
+resource "aws_instance" "jenkins_master" {
+  ami           = "ami-0e86e20dae9224db8"
+  instance_type = "t2.micro"
+  tags = {
+    Name = "Jenkins-Master"
+  }
+}
+
+resource "aws_instance" "kubernetes_master" {
+  ami           = "ami-0e86e20dae9224db8"
+  instance_type = "t2.micro"
+  tags = {
+    Name = "Kubernetes-Master"
+  }
+}
+
+resource "aws_instance" "kubernetes_slave" {
+  ami           = "ami-0e86e20dae9224db8"
+  instance_type = "t2.micro"
+  tags = {
+    Name = "Kubernetes-Slave"
+  }
+}
+
+This created additional 3 instances for the pipeline.
+Commands used
+terraform init
+terraform plan
+terraform apply
+
+Created a public-key and updated it into the .ssh/authorized_keys for each instance that was created.
+ssh-keygen is the command
+
+In the terraform-master instance
+under the /etc/ansible/ updated the hosts with the private IPs of the instances.
+
+Checked the ping-pong connection
+All were satisfied
+
+Next, created 2 playbooks - Kubernetes.yaml & jenkins.yaml
+Kubernetes.yml
+- name: Install Kubernetes
+  hosts: kubernetes-master
+  become: yes
+  tasks:
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Install kubeadm, kubelet, kubectl
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - kubeadm
+        - kubelet
+        - kubectl
+
+    - name: Start Kubernetes services
+      service:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      with_items:
+        - kubelet
+        - docker
+
+Jenkins.yml
+- name: Install Jenkins
+  hosts: jenkins-master
+  become: yes
+  tasks:
+    - name: Add Jenkins repository key
+      apt_key:
+        url: https://pkg.jenkins.io/debian/jenkins.io.key
+        state: present
+
+    - name: Add Jenkins repository
+      apt_repository:
+        repo: deb http://pkg.jenkins.io/debian-stable binary/
+        state: present
+
+    - name: Install Jenkins
+      apt:
+        name: jenkins
+        state: present
+
+    - name: Start Jenkins service
+      service:
+        name: jenkins
+        state: started
+        enabled: yes
+
+
+Run the ansible playbooks using the commands:
+ansible-playbook kubernetes.yml --syntax-check
+ansible-playbook kubernetes.yml
+ansible-playbook jenkins.yml --syntax-check
+ansible-playbook jenkins.yml
+
+Next, created Dockerfile & Jenkinsfile
+Dockerfile:
+# Use the official Nginx image from the Docker Hub as the base image
+FROM nginx:latest
+
+# Copy the custom HTML file into the Nginx default directory
+COPY index.html /usr/share/nginx/html/index.html
+
+# Expose port 80 to the outside world
+EXPOSE 80
+
+# Start Nginx server
+CMD ["nginx", "-g", "daemon off;"]
+
+Jenkinsfile:
+pipeline {
+    agent any
+    stages {
+        stage('Build Docker Image') {
+            steps {
+                script {
+                    docker.build("website-image", ".")
+                }
+            }
+        }
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    docker.withRegistry('https://index.docker.io/v1/', 'dockerhub-credentials') {
+                        docker.image("website-image").push("latest")
+                    }
+                }
+            }
+        }
+        stage('Deploy to Kubernetes') {
+            steps {
+                script {
+                    kubernetesDeploy(configs: 'k8s/deployment.yaml,k8s/service.yaml', kubeconfigId: 'kube-config')
+                }
+            }
+        }
+    }
+    triggers {
+        githubPush()
+    }
+}
+
+Next;
+created Kubernetes deployment.yaml file
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: website-deployment
+spec:
+  replicas: 5
+  selector:
+    matchLabels:
+      app: website
+  template:
+    metadata:
+      labels:
+        app: website
+    spec:
+      containers:
+      - name: website
+        image: <your-dockerhub-username>/website-image:latest
+        ports:
+        - containerPort: 8080
+
+Created service.yaml file
+
+apiVersion: v1
+kind: Service
+metadata:
+  name: website-service
+spec:
+  type: NodePort
+  selector:
+    app: website
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+      nodePort: 30010
+
+Added these deployment files on GitHub repo.
+
+ 
